@@ -1,0 +1,120 @@
+package main
+
+import (
+	"fmt"
+	"net/http"
+	"strconv"
+	"sync"
+)
+
+// Структура для збереження ходу
+type Move struct {
+	Player string // "X" або "0"
+	X, Y   int
+}
+
+var (
+	// Поле 100х100 за завданням
+	board [100][100]string
+	// Черга на 50 запитів (buffered channel)
+	queue = make(chan Move, 50)
+	mu    sync.Mutex
+)
+
+func main() {
+	// Другий рівень: Воркер, який обробляє чергу в фоні
+	go worker()
+
+	// Перший рівень: HTTP сервер
+	http.HandleFunc("/move", moveHandler)
+
+	// Додаємо функцію очищення поля (RESET)
+	http.HandleFunc("/reset", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		board = [100][100]string{} // Повністю очищуємо масив
+		mu.Unlock()
+		fmt.Fprint(w, "Поле очищено! Можна починати нову гру.")
+		fmt.Println("\n--- Команда: Поле було скинуто до початкового стану ---")
+	})
+
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "Сервер працює! /move для ходу, /reset для очищення.")
+	})
+
+	fmt.Println("Сервер запущено на порту :8080. Очікування ходів...")
+	// CodeSandbox автоматично прокине цей порт
+	http.ListenAndServe(":8080", nil)
+}
+
+func moveHandler(w http.ResponseWriter, r *http.Request) {
+	// Отримання параметрів з URL
+	p := r.URL.Query().Get("p")
+	xStr := r.URL.Query().Get("x")
+	yStr := r.URL.Query().Get("y")
+
+	x, _ := strconv.Atoi(xStr)
+	y, _ := strconv.Atoi(yStr)
+
+	// Валідація
+	if p == "" || x < 0 || x >= 100 || y < 0 || y >= 100 {
+		http.Error(w, "Неправильний хід. Приклад: /move?p=X&x=1&y=1", 400)
+		return
+	}
+
+	move := Move{Player: p, X: x, Y: y}
+
+	// Спроба додати в чергу
+	select {
+	case queue <- move:
+		fmt.Fprintf(w, "Хід %s на (%d,%d) додано в чергу", p, x, y)
+	default:
+		// Якщо черга переповнена (більше 50)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprint(w, "Помилка: черга переповнена (50/50)")
+	}
+}
+
+func worker() {
+	for m := range queue {
+		mu.Lock()
+		// Перевірка чи клітинка вільна
+		if board[m.X][m.Y] == "" {
+			board[m.X][m.Y] = m.Player
+			fmt.Printf("Оброблено: %s на [%d,%d]\n", m.Player, m.X, m.Y)
+
+			// Перевірка на 5 в ряд
+			if checkWin(m.X, m.Y, m.Player) {
+				fmt.Printf("!!! ПЕРЕМОГА ГРАВЦЯ %s !!!\n", m.Player)
+			}
+		}
+		mu.Unlock()
+	}
+}
+
+func checkWin(x, y int, p string) bool {
+	// Напрямки: горизонталь, вертикаль, дві діагоналі
+	dirs := [][]int{{0, 1}, {1, 0}, {1, 1}, {1, -1}}
+	for _, d := range dirs {
+		count := 1
+		for i := 1; i < 5; i++ {
+			nx, ny := x+d[0]*i, y+d[1]*i
+			if nx >= 0 && nx < 100 && ny >= 0 && ny < 100 && board[nx][ny] == p {
+				count++
+			} else {
+				break
+			}
+		}
+		for i := 1; i < 5; i++ {
+			nx, ny := x-d[0]*i, y-d[1]*i
+			if nx >= 0 && nx < 100 && ny >= 0 && ny < 100 && board[nx][ny] == p {
+				count++
+			} else {
+				break
+			}
+		}
+		if count >= 5 {
+			return true
+		}
+	}
+	return false
+}
